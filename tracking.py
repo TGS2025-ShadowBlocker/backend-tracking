@@ -67,7 +67,21 @@ class SimpleActionDetector:
         if self.action_cooldown > 0:
             self.action_cooldown -= 1
             return
+
         
+        visibility_vals = [lm.get('visibility', 0.0) for lm in landmarks]
+        visible_count = sum(1 for v in visibility_vals if v > 0.4)
+        if visible_count < 10:
+            # 十分な可視性がない場合は検知を行わず状態をリセット
+            self.punch_detected = False
+            self.kick_detected = False
+            # 履歴をクリアして古い速度が誤検知を誘発しないようにする
+            self.left_wrist_history.clear()
+            self.right_wrist_history.clear()
+            self.left_ankle_history.clear()
+            self.right_ankle_history.clear()
+            return
+
         # 関節の位置を更新
         if len(landmarks) > 28:  # MediaPipeの関節数確認
             # 関節の位置を取得
@@ -79,23 +93,36 @@ class SimpleActionDetector:
             right_shoulder = landmarks[12]
             left_hip = landmarks[23]
             right_hip = landmarks[24]
-            
+
+            # 主要キーポイントの可視性が低ければ検知を行わない
+            visibility_threshold = 0.4
+            keypoints = [left_wrist, right_wrist, left_ankle, right_ankle,
+                         left_shoulder, right_shoulder, left_hip, right_hip]
+            if any(k.get('visibility', 0.0) < visibility_threshold for k in keypoints):
+                self.punch_detected = False
+                self.kick_detected = False
+                self.left_wrist_history.clear()
+                self.right_wrist_history.clear()
+                self.left_ankle_history.clear()
+                self.right_ankle_history.clear()
+                return
+
             self.left_wrist_history.append([left_wrist['x'], left_wrist['y']])
             self.right_wrist_history.append([right_wrist['x'], right_wrist['y']])
             self.left_ankle_history.append([left_ankle['x'], left_ankle['y']])
             self.right_ankle_history.append([right_ankle['x'], right_ankle['y']])
-            
+
             # 速度と加速度を計算
             left_wrist_vel = self.calculate_velocity(self.left_wrist_history)
             right_wrist_vel = self.calculate_velocity(self.right_wrist_history)
             left_ankle_vel = self.calculate_velocity(self.left_ankle_history)
             right_ankle_vel = self.calculate_velocity(self.right_ankle_history)
-            
+
             left_wrist_acc = self.calculate_acceleration(self.left_wrist_history)
             right_wrist_acc = self.calculate_acceleration(self.right_wrist_history)
             left_ankle_acc = self.calculate_acceleration(self.left_ankle_history)
             right_ankle_acc = self.calculate_acceleration(self.right_ankle_history)
-            
+
             # デバッグ情報を更新
             self.debug_info.update({
                 'left_wrist_velocity': left_wrist_vel,
@@ -107,7 +134,7 @@ class SimpleActionDetector:
                 'left_ankle_acceleration': left_ankle_acc,
                 'right_ankle_acceleration': right_ankle_acc
             })
-            
+
             # パンチ検知（方向性と姿勢を考慮）
             left_punch_score = self.calculate_punch_score(
                 left_wrist_vel, left_wrist_acc, left_wrist, left_shoulder
@@ -115,28 +142,41 @@ class SimpleActionDetector:
             right_punch_score = self.calculate_punch_score(
                 right_wrist_vel, right_wrist_acc, right_wrist, right_shoulder
             )
-            
+
             # キック検知（方向性と姿勢を考慮）
+            # 垂直成分（上方向）を計算: 前のフレームと比較して y が減少していれば上向き
+            left_ankle_vy = 0.0
+            right_ankle_vy = 0.0
+            if len(self.left_ankle_history) >= 2:
+                prev = self.left_ankle_history[-2][1]
+                curr = self.left_ankle_history[-1][1]
+                left_ankle_vy = prev - curr
+            if len(self.right_ankle_history) >= 2:
+                prev = self.right_ankle_history[-2][1]
+                curr = self.right_ankle_history[-1][1]
+                right_ankle_vy = prev - curr
+
             left_kick_score = self.calculate_kick_score(
-                left_ankle_vel, left_ankle_acc, left_ankle, left_hip
+                left_ankle_vel, left_ankle_acc, left_ankle, left_hip, left_ankle_vy
             )
             right_kick_score = self.calculate_kick_score(
-                right_ankle_vel, right_ankle_acc, right_ankle, right_hip
+                right_ankle_vel, right_ankle_acc, right_ankle, right_hip, right_ankle_vy
             )
-            
+
             # スコアを更新
             self.debug_info['left_punch_score'] = left_punch_score
             self.debug_info['right_punch_score'] = right_punch_score
             self.debug_info['left_kick_score'] = left_kick_score
             self.debug_info['right_kick_score'] = right_kick_score
-            
+
             # 動作検知判定（互いに排他的）
             punch_threshold = 0.08
-            kick_threshold = 0.08
-            
+            # キックの閾値を上げ、垂直成分の要件を強める
+            kick_threshold = 0.12
+
             max_punch_score = max(left_punch_score, right_punch_score)
             max_kick_score = max(left_kick_score, right_kick_score)
-            
+
             # キックが検知された場合、パンチは無効
             if max_kick_score > kick_threshold:
                 self.kick_detected = True
@@ -171,19 +211,24 @@ class SimpleActionDetector:
         
         return base_score
     
-    def calculate_kick_score(self, velocity, acceleration, ankle, hip):
-        """キックスコアを計算（上方向の動きを重視）"""
+    def calculate_kick_score(self, velocity, acceleration, ankle, hip, vertical_vel=0.0):
+        """キックスコアを計算（上方向の動きを重視）。vertical_vel は前フレームとの差分（正なら上方向）。"""
         base_score = velocity + acceleration
-        
-        # 上方向への動きを重視
-        # 足首が腰より上に上がっている場合
-        if ankle['y'] < hip['y']:
-            base_score *= 2.0  # 上方向への動きを強化
-        
-        # 明確な上下動を検出
-        if velocity > 0.02:  # 明確な動きがある場合
-            base_score *= 1.5
-        
+
+        # 足首が腰より上に上がっている場合はスコアを強化（多少のマージンを要求）
+        if ankle['y'] < hip['y'] - 0.02:
+            base_score *= 2.0
+
+        # 上方向の明確な速度成分があることを要求（軽い動きでは増強しない）
+        if vertical_vel > 0.01:
+            base_score *= 1.8
+        else:
+            base_score *= 0.5
+
+        # 最低速度条件を満たさない場合はスコアをさらに下げる
+        if velocity < 0.015:
+            base_score *= 0.6
+
         return base_score
 
     def get_detected_actions(self):
