@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import threading
 import cv2
 from tracking import RealtimePoseTracker
+from detected.person_detected import PersonSegmentation
 import uvicorn
 import time
 
@@ -31,6 +32,7 @@ app.add_middleware(
 
 # グローバル変数でトラッキング状態を管理
 tracker = None
+person_processor = None
 current_actions = {"punch": False, "kick": False}
 tracking_thread = None
 tracking_active = False
@@ -197,6 +199,7 @@ def tracking_worker():
 
             # 生のカメラフレームを保存
             current_frame = frame.copy()
+
 
             # ポーズトラッキングを実行
             processed = tracker.process_frame(frame)
