@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import threading
 import cv2
 from tracking import RealtimePoseTracker
+from detected.person_detected import PersonSegmentation
 import uvicorn
 import time
 
@@ -23,17 +24,19 @@ app.add_middleware(
 
 # グローバル変数でトラッキング状態を管理
 tracker = None
+person_processor = None
 current_actions = {"punch": False, "kick": False}
 tracking_thread = None
 tracking_active = False
 # 現在のフレームを保存するグローバル変数
 current_frame = None
 processed_frame = None
+person_processed_frame = None
 
 def tracking_worker():
     """バックグラウンドでポーズトラッキングを実行"""
     global tracker, current_actions, tracking_active, current_frame, processed_frame
-    
+    global person_processor, person_processed_frame
     # カメラを初期化
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -42,6 +45,12 @@ def tracking_worker():
     
     # ポーズトラッカーを初期化
     tracker = RealtimePoseTracker()
+    # PersonSegmentationは外部キャプチャを使うため use_camera=False
+    try:
+        person_processor = PersonSegmentation(use_camera=False, setup_server=False)
+    except Exception as e:
+        print(f"PersonSegmentation 初期化エラー: {e}")
+        person_processor = None
     
     print("ポーズトラッキングを開始しました")
     
@@ -57,11 +66,15 @@ def tracking_worker():
             
             # 生のカメラフレームを保存
             current_frame = frame.copy()
-            
+
             # ポーズトラッキングを実行
             processed = tracker.process_frame(frame)
             processed_frame = processed if processed is not None else frame.copy()
-            
+
+            # PersonSegmentationに同じフレームを渡して処理
+            if person_processor:
+                person_processed_frame = _process_person_frame(person_processor, frame, person_processed_frame)
+
             # 検知結果を更新
             actions = tracker.get_detected_actions()
             current_actions.update(actions)
@@ -75,6 +88,16 @@ def tracking_worker():
     finally:
         cap.release()
         print("ポーズトラッキングを終了しました")
+
+
+def _process_person_frame(person_processor, frame, fallback):
+    """小さなヘルパー: person_processor にフレームを渡して結果を返す"""
+    try:
+        person_frame, _ = person_processor.process_frame(frame)
+        return person_frame if person_frame is not None else fallback
+    except Exception as e:
+        print(f"PersonSegmentation エラー: {e}")
+        return fallback
 
 @app.on_event("startup")
 async def startup_event():
@@ -94,6 +117,13 @@ async def shutdown_event():
     tracking_active = False
     if tracker:
         tracker.cleanup()
+    # person_processorがあれば停止してリソースを解放
+    global person_processor
+    if person_processor:
+        try:
+            person_processor.stop()
+        except Exception:
+            pass
     print("APIサーバーが終了しました")
 
 def generate_frames():
