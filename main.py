@@ -31,7 +31,13 @@ app.add_middleware(
 
 # グローバル変数でトラッキング状態を管理
 tracker = None
-current_actions = {"punch": False, "kick": False}
+current_actions = {
+    "punch": False, 
+    "kick": False,
+    "landmarks": {},
+    "hand_coordinates": {},
+    "foot_coordinates": {}
+}
 tracking_thread = None
 tracking_active = False
 
@@ -210,6 +216,37 @@ def tracking_worker():
             # 検知結果を更新
             actions = tracker.get_detected_actions()
             current_actions.update(actions)
+            
+            # 手足の座標情報を取得して追加
+            if hasattr(tracker, 'skeleton_data') and tracker.skeleton_data:
+                latest_frame_data = tracker.skeleton_data[-1]
+                landmarks = latest_frame_data['landmarks']
+                
+                # MediaPipeの関節インデックス
+                # 15: 左手首, 16: 右手首, 27: 左足首, 28: 右足首
+                # 11: 左肩, 12: 右肩, 23: 左腰, 24: 右腰
+                if len(landmarks) > 28:
+                    current_actions["landmarks"] = {
+                        "left_wrist": {"x": landmarks[15]["x"], "y": landmarks[15]["y"], "z": landmarks[15]["z"], "visibility": landmarks[15]["visibility"]},
+                        "right_wrist": {"x": landmarks[16]["x"], "y": landmarks[16]["y"], "z": landmarks[16]["z"], "visibility": landmarks[16]["visibility"]},
+                        "left_ankle": {"x": landmarks[27]["x"], "y": landmarks[27]["y"], "z": landmarks[27]["z"], "visibility": landmarks[27]["visibility"]},
+                        "right_ankle": {"x": landmarks[28]["x"], "y": landmarks[28]["y"], "z": landmarks[28]["z"], "visibility": landmarks[28]["visibility"]},
+                        "left_shoulder": {"x": landmarks[11]["x"], "y": landmarks[11]["y"], "z": landmarks[11]["z"], "visibility": landmarks[11]["visibility"]},
+                        "right_shoulder": {"x": landmarks[12]["x"], "y": landmarks[12]["y"], "z": landmarks[12]["z"], "visibility": landmarks[12]["visibility"]},
+                        "left_hip": {"x": landmarks[23]["x"], "y": landmarks[23]["y"], "z": landmarks[23]["z"], "visibility": landmarks[23]["visibility"]},
+                        "right_hip": {"x": landmarks[24]["x"], "y": landmarks[24]["y"], "z": landmarks[24]["z"], "visibility": landmarks[24]["visibility"]}
+                    }
+                    
+                    # 手と足の座標を分けて格納
+                    current_actions["hand_coordinates"] = {
+                        "left_hand": {"x": landmarks[15]["x"], "y": landmarks[15]["y"], "z": landmarks[15]["z"]},
+                        "right_hand": {"x": landmarks[16]["x"], "y": landmarks[16]["y"], "z": landmarks[16]["z"]}
+                    }
+                    
+                    current_actions["foot_coordinates"] = {
+                        "left_foot": {"x": landmarks[27]["x"], "y": landmarks[27]["y"], "z": landmarks[27]["z"]},
+                        "right_foot": {"x": landmarks[28]["x"], "y": landmarks[28]["y"], "z": landmarks[28]["z"]}
+                    }
 
             # フレームレートを調整（30FPS）
             time.sleep(1/30)
